@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   fetchLatestRate,
   fetchHistoricalRates,
@@ -29,6 +29,9 @@ export function useExchangeRate(from: string, to: string, timeRange: TimeRange) 
     currencies: [],
   });
 
+  // Ref so the currencies cache survives re-renders without being a stale closure dep
+  const currenciesRef = useRef<string[]>([]);
+
   const load = useCallback(async () => {
     setState(s => ({ ...s, loading: true, error: null }));
     try {
@@ -37,8 +40,11 @@ export function useExchangeRate(from: string, to: string, timeRange: TimeRange) 
 
       const [{ rate, previousRate }, currencies] = await Promise.all([
         fetchLatestRate(from, to),
-        state.currencies.length > 0 ? Promise.resolve(state.currencies) : fetchCurrencies(),
+        currenciesRef.current.length > 0
+          ? Promise.resolve(currenciesRef.current)
+          : fetchCurrencies(),
       ]);
+      currenciesRef.current = currencies;
 
       const change = rate - previousRate;
       const changePct = previousRate !== 0 ? (change / previousRate) * 100 : 0;
@@ -53,12 +59,11 @@ export function useExchangeRate(from: string, to: string, timeRange: TimeRange) 
         currencies,
       }));
 
-      // Fetch historical separately so a timeout doesn't block the rate display
       try {
-        const historical = await fetchHistoricalRates(from, to, startDate, today);
+        const historical = await fetchHistoricalRates(from, to, startDate, today, timeRange);
         setState(s => ({ ...s, data: historical }));
       } catch {
-        // Historical data unavailable — chart stays empty, rate still shows
+        // silently skip — chart stays empty, rate still shows
       }
     } catch (err) {
       setState(s => ({

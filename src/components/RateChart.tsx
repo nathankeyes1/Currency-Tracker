@@ -1,12 +1,15 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import * as Haptics from 'expo-haptics';
-import { View, Text, StyleSheet, Dimensions, Animated } from 'react-native';
+import { View, Text, StyleSheet, Dimensions, Animated, Easing } from 'react-native';
 import Svg, {
   Path,
   Line,
   Circle,
   Text as SvgText,
   Rect,
+  Defs,
+  LinearGradient,
+  Stop,
 } from 'react-native-svg';
 import * as d3Shape from 'd3-shape';
 import * as d3Scale from 'd3-scale';
@@ -45,49 +48,77 @@ export function RateChart({ data, currentRate, onScrub }: Props) {
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
   const lastIdxRef = useRef(-1);
 
-  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const pulseScaleAnim   = useRef(new Animated.Value(1)).current;
+  const pulseOpacityAnim = useRef(new Animated.Value(0.25)).current;
+  const chartFadeAnim    = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     if (data.length === 0) return;
-    const animation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 1.6, duration: 1000, useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 1,   duration: 1000, useNativeDriver: true }),
+
+    // Radar-ping: scale out + fade to nothing, loop
+    pulseScaleAnim.setValue(1);
+    pulseOpacityAnim.setValue(0.25);
+    const ping = Animated.loop(
+      Animated.parallel([
+        Animated.timing(pulseScaleAnim, {
+          toValue: 2.4,
+          duration: 1100,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseOpacityAnim, {
+          toValue: 0,
+          duration: 1100,
+          useNativeDriver: true,
+        }),
       ]),
     );
-    animation.start();
-    return () => animation.stop();
+    ping.start();
+
+    // Fade chart in when data first arrives
+    chartFadeAnim.setValue(0);
+    Animated.timing(chartFadeAnim, {
+      toValue: 1,
+      duration: 300,
+      easing: Easing.out(Easing.ease),
+      useNativeDriver: true,
+    }).start();
+
+    return () => ping.stop();
   }, [data]);
 
   const innerW = CHART_WIDTH;
   const innerH = CHART_HEIGHT - PADDING_TOP - PADDING_BOTTOM;
 
-  const xScale = d3Scale
-    .scalePoint<string>()
-    .domain(data.map(d => d.date))
-    .range([0, innerW])
-    .padding(0);
+  const { xScale, yScale, linePath, areaPath, yTicks } = useMemo(() => {
+    const xScale = d3Scale
+      .scalePoint<string>()
+      .domain(data.map(d => d.date))
+      .range([0, innerW])
+      .padding(0);
 
-  const [yMin, yMax] = d3Array.extent(data, d => d.rate) as [number, number];
-  const yPad = (yMax - yMin) * 0.1 || 0.001;
-  const yScale = d3Scale
-    .scaleLinear()
-    .domain([yMin - yPad, yMax + yPad])
-    .range([innerH, 0]);
+    const [yMin, yMax] = d3Array.extent(data, d => d.rate) as [number, number];
+    const yPad = (yMax - yMin) * 0.15 || 0.001;
+    const yScale = d3Scale
+      .scaleLinear()
+      .domain([yMin - yPad, yMax + yPad])
+      .range([innerH, 0]);
 
-  // Line generator
-  const lineGen = d3Shape
-    .line<RatePoint>()
-    .x(d => xScale(d.date) ?? 0)
-    .y(d => yScale(d.rate))
-    .curve(d3Shape.curveMonotoneX);
+    const curve = d3Shape.curveMonotoneX;
+    const linePath = d3Shape.line<RatePoint>()
+      .x(d => xScale(d.date) ?? 0)
+      .y(d => yScale(d.rate))
+      .curve(curve)(data) ?? '';
 
-  const linePath = lineGen(data) ?? '';
+    const areaPath = d3Shape.area<RatePoint>()
+      .x(d => xScale(d.date) ?? 0)
+      .y0(innerH)
+      .y1(d => yScale(d.rate))
+      .curve(curve)(data) ?? '';
 
-  // Y-axis ticks
-  const yTicks = yScale.ticks(5);
+    return { xScale, yScale, linePath, areaPath, yTicks: yScale.ticks(5) };
+  }, [data, innerW, innerH]);
 
-  // Current rate horizontal line
   const currentRateY =
     currentRate !== null ? yScale(currentRate) + PADDING_TOP : null;
 
@@ -168,7 +199,15 @@ export function RateChart({ data, currentRate, onScrub }: Props) {
       onTouchMove={handleTouch}
       onTouchEnd={handleTouchEnd}
     >
+      <Animated.View style={{ opacity: chartFadeAnim, flex: 1 }}>
       <Svg width={svgWidth} height={CHART_HEIGHT}>
+        <Defs>
+          <LinearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0%" stopColor={PRIMARY} stopOpacity={0.18} />
+            <Stop offset="100%" stopColor={PRIMARY} stopOpacity={0} />
+          </LinearGradient>
+        </Defs>
+
         {/* Y-axis ticks + grid lines */}
         {yTicks.map(tick => {
           const ty = yScale(tick) + PADDING_TOP;
@@ -200,12 +239,20 @@ export function RateChart({ data, currentRate, onScrub }: Props) {
           />
         )}
 
+        {/* Gradient area fill */}
+        <Path
+          d={areaPath}
+          fill="url(#areaGradient)"
+          stroke="none"
+          transform={`translate(${PADDING_LEFT}, ${PADDING_TOP})`}
+        />
+
         {/* Line */}
         <Path
           d={linePath}
           fill="none"
           stroke={PRIMARY}
-          strokeWidth={2}
+          strokeWidth={1.5}
           transform={`translate(${PADDING_LEFT}, ${PADDING_TOP})`}
         />
 
@@ -275,10 +322,10 @@ export function RateChart({ data, currentRate, onScrub }: Props) {
           height: 18,
           borderRadius: 9,
           backgroundColor: PRIMARY,
-          opacity: 0.2,
+          opacity: pulseOpacityAnim,
           left: dotX - 9,
           top: dotY - 9,
-          transform: [{ scale: pulseAnim }],
+          transform: [{ scale: pulseScaleAnim }],
         }}
       />
       {/* Inner dot */}
@@ -294,6 +341,7 @@ export function RateChart({ data, currentRate, onScrub }: Props) {
           top: dotY - 4,
         }}
       />
+      </Animated.View>
     </View>
   );
 }

@@ -61,12 +61,13 @@ export function HomeScreen() {
         Animated.timing(scrimAnim, {
           toValue: 1,
           duration: 250,
+          easing: Easing.out(Easing.quad),
           useNativeDriver: true,
         }),
         Animated.timing(sheetAnim, {
           toValue: 0,
-          duration: 320,
-          easing: Easing.out(Easing.cubic),
+          duration: 280,
+          easing: Easing.bezier(0.32, 0.72, 0, 1),
           useNativeDriver: true,
         }),
       ]).start();
@@ -82,8 +83,8 @@ export function HomeScreen() {
       }),
       Animated.timing(sheetAnim, {
         toValue: 400,
-        duration: 240,
-        easing: Easing.in(Easing.cubic),
+        duration: 200,
+        easing: Easing.bezier(0.22, 1, 0.36, 1),
         useNativeDriver: true,
       }),
     ]).start(() => {
