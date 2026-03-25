@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import * as Haptics from 'expo-haptics';
-import { View, Text, StyleSheet, Dimensions, Animated, Easing } from 'react-native';
+import { View, Text, StyleSheet, Dimensions, Animated } from 'react-native';
 import Svg, {
   Path,
   Line,
@@ -12,8 +12,6 @@ import * as d3Shape from 'd3-shape';
 import * as d3Scale from 'd3-scale';
 import * as d3Array from 'd3-array';
 import type { RatePoint } from '../api/frankfurter';
-
-const AnimatedPath = Animated.createAnimatedComponent(Path);
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -47,19 +45,7 @@ export function RateChart({ data, currentRate, onScrub }: Props) {
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
   const lastIdxRef = useRef(-1);
 
-  const drawAnim = useRef(new Animated.Value(5000)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
-
-  useEffect(() => {
-    if (data.length === 0) return;
-    drawAnim.setValue(5000);
-    Animated.timing(drawAnim, {
-      toValue: 0,
-      duration: 600,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: false,
-    }).start();
-  }, [data]);
 
   useEffect(() => {
     if (data.length === 0) return;
@@ -215,13 +201,11 @@ export function RateChart({ data, currentRate, onScrub }: Props) {
         )}
 
         {/* Line */}
-        <AnimatedPath
+        <Path
           d={linePath}
           fill="none"
           stroke={PRIMARY}
           strokeWidth={2}
-          strokeDasharray={5000}
-          strokeDashoffset={drawAnim}
           transform={`translate(${PADDING_LEFT}, ${PADDING_TOP})`}
         />
 
