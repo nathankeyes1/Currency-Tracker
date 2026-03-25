@@ -6,6 +6,7 @@ import {
   StyleSheet,
   SafeAreaView,
   TouchableOpacity,
+  Pressable,
   Alert,
   Modal,
   Animated,
@@ -51,17 +52,17 @@ export function HomeScreen() {
   const [flipTrigger, setFlipTrigger] = useState(0);
 
   const scrimAnim = useRef(new Animated.Value(0)).current;
-  const sheetAnim = useRef(new Animated.Value(400)).current;
+  const sheetAnim = useRef(new Animated.Value(600)).current;
 
   useEffect(() => {
     if (amountModalVisible) {
       scrimAnim.setValue(0);
-      sheetAnim.setValue(400);
+      sheetAnim.setValue(600);
       Animated.parallel([
         Animated.timing(scrimAnim, {
           toValue: 1,
           duration: 250,
-          easing: Easing.out(Easing.quad),
+          easing: Easing.out(Easing.cubic),
           useNativeDriver: true,
         }),
         Animated.timing(sheetAnim, {
@@ -82,7 +83,7 @@ export function HomeScreen() {
         useNativeDriver: true,
       }),
       Animated.timing(sheetAnim, {
-        toValue: 400,
+        toValue: 600,
         duration: 200,
         easing: Easing.bezier(0.22, 1, 0.36, 1),
         useNativeDriver: true,
@@ -112,15 +113,17 @@ export function HomeScreen() {
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
       >
-        {/* Rate display */}
-        <RateHeader
-          from={from}
-          to={to}
-          rate={displayRate}
-          change={change}
-          changePct={changePct}
-          flipTrigger={flipTrigger}
-        />
+        {/* Rate display — fixed min-height prevents chart from shifting during scrub */}
+        <View style={styles.headerContainer}>
+          <RateHeader
+            from={from}
+            to={to}
+            rate={displayRate}
+            change={change}
+            changePct={changePct}
+            flipTrigger={flipTrigger}
+          />
+        </View>
 
         {/* Chart */}
         <View style={styles.chartContainer}>
@@ -225,18 +228,26 @@ export function HomeScreen() {
 
       {/* Sticky CTA footer */}
       <View style={styles.ctaRow}>
-        <TouchableOpacity
-          style={[styles.ctaButton, styles.ctaPrimary]}
+        <Pressable
+          style={({ pressed }) => [
+            styles.ctaButton,
+            styles.ctaPrimary,
+            { transform: [{ scale: pressed ? 0.97 : 1 }] },
+          ]}
           onPress={() => Alert.alert('Send coming soon')}
         >
           <Text style={styles.ctaPrimaryText}>Send</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.ctaButton, styles.ctaSecondary]}
+        </Pressable>
+        <Pressable
+          style={({ pressed }) => [
+            styles.ctaButton,
+            styles.ctaSecondary,
+            { transform: [{ scale: pressed ? 0.97 : 1 }] },
+          ]}
           onPress={() => Alert.alert('Request coming soon')}
         >
           <Text style={styles.ctaSecondaryText}>Request</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
     </SafeAreaView>
   );
@@ -253,6 +264,9 @@ const styles = StyleSheet.create({
   },
   content: {
     paddingBottom: 72,
+  },
+  headerContainer: {
+    minHeight: 132,
   },
   chartContainer: {
     marginTop: 4,

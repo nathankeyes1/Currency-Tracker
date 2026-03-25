@@ -5,8 +5,6 @@ import Svg, {
   Path,
   Line,
   Circle,
-  Text as SvgText,
-  Rect,
   Defs,
   LinearGradient,
   Stop,
@@ -24,11 +22,65 @@ const PADDING_RIGHT = 16;
 const PADDING_TOP = 16;
 const PADDING_BOTTOM = 32;
 const CHART_WIDTH = SCREEN_WIDTH - PADDING_LEFT - PADDING_RIGHT;
+const INNER_W = CHART_WIDTH;
+const INNER_H = CHART_HEIGHT - PADDING_TOP - PADDING_BOTTOM;
+
+const N_POINTS = 60;
+const TRANSITION_DURATION = 380;
+const PILL_WIDTH = 88;
 
 const PRIMARY = '#2C415A';
 const NEU_300 = '#D4D0C9';
 const NEU_500 = '#8D8A83';
-const NEU_900 = '#242620';
+
+// ─── Transition helpers ──────────────────────────────────────────────────────
+
+type Pixel = { x: number; y: number };
+
+function easeInOut(t: number): number {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+/** Resample a dataset to N evenly-spaced pixel coordinates using each dataset's own y scale. */
+function normalizeDataToPixels(data: RatePoint[]): Pixel[] {
+  if (data.length < 2) return [];
+
+  const [yMin, yMax] = d3Array.extent(data, d => d.rate) as [number, number];
+  const yPad = (yMax - yMin) * 0.15 || 0.001;
+  const yScale = d3Scale
+    .scaleLinear()
+    .domain([yMin - yPad, yMax + yPad])
+    .range([INNER_H, 0]);
+
+  return Array.from({ length: N_POINTS }, (_, i) => {
+    const t = i / (N_POINTS - 1);
+    const raw = t * (data.length - 1);
+    const lo = Math.floor(raw);
+    const hi = Math.min(lo + 1, data.length - 1);
+    const frac = raw - lo;
+    const y = yScale(data[lo].rate) + (yScale(data[hi].rate) - yScale(data[lo].rate)) * frac;
+    return { x: t * INNER_W, y };
+  });
+}
+
+function pixelsToLinePath(pixels: Pixel[]): string {
+  return d3Shape
+    .line<Pixel>()
+    .x(d => d.x)
+    .y(d => d.y)
+    .curve(d3Shape.curveMonotoneX)(pixels) ?? '';
+}
+
+function pixelsToAreaPath(pixels: Pixel[]): string {
+  return d3Shape
+    .area<Pixel>()
+    .x(d => d.x)
+    .y0(INNER_H)
+    .y1(d => d.y)
+    .curve(d3Shape.curveMonotoneX)(pixels) ?? '';
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
 
 interface Props {
   data: RatePoint[];
@@ -41,21 +93,36 @@ interface TooltipState {
   y: number;
   date: string;
   rate: number;
-  screenX: number;
+  idx: number;
+}
+
+interface TransitionState {
+  linePath: string;
+  areaPath: string;
 }
 
 export function RateChart({ data, currentRate, onScrub }: Props) {
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
+  const [transition, setTransition] = useState<TransitionState | null>(null);
+  // Holds the last fully-settled pixel paths — never jumps to new data mid-flight
+  const [settledPaths, setSettledPaths] = useState({ line: '', area: '' });
+
   const lastIdxRef = useRef(-1);
+  const hasAnimatedIn = useRef(false);
+  // Stores the pixel array of the last fully-settled render (used as "from" on next transition)
+  const settledPixelsRef = useRef<Pixel[]>([]);
+  // Stores the pixel array currently being displayed (updated each RAF frame for interruptions)
+  const currentPixelsRef = useRef<Pixel[]>([]);
+  const rafRef = useRef<number>(0);
 
   const pulseScaleAnim   = useRef(new Animated.Value(1)).current;
   const pulseOpacityAnim = useRef(new Animated.Value(0.25)).current;
   const chartFadeAnim    = useRef(new Animated.Value(0)).current;
 
+  // Fade-in + pulse on initial data load
   useEffect(() => {
     if (data.length === 0) return;
 
-    // Radar-ping: scale out + fade to nothing, loop
     pulseScaleAnim.setValue(1);
     pulseOpacityAnim.setValue(0.25);
     const ping = Animated.loop(
@@ -75,26 +142,86 @@ export function RateChart({ data, currentRate, onScrub }: Props) {
     );
     ping.start();
 
-    // Fade chart in when data first arrives
-    chartFadeAnim.setValue(0);
-    Animated.timing(chartFadeAnim, {
-      toValue: 1,
-      duration: 300,
-      easing: Easing.out(Easing.ease),
-      useNativeDriver: true,
-    }).start();
+    if (!hasAnimatedIn.current) {
+      hasAnimatedIn.current = true;
+      chartFadeAnim.setValue(0);
+      Animated.timing(chartFadeAnim, {
+        toValue: 1,
+        duration: 300,
+        easing: Easing.out(Easing.ease),
+        useNativeDriver: true,
+      }).start();
+    }
 
     return () => ping.stop();
   }, [data]);
 
-  const innerW = CHART_WIDTH;
-  const innerH = CHART_HEIGHT - PADDING_TOP - PADDING_BOTTOM;
+  // Morph transition when data changes
+  useEffect(() => {
+    if (data.length === 0) return;
 
-  const { xScale, yScale, linePath, areaPath, yTicks } = useMemo(() => {
+    const toPixels = normalizeDataToPixels(data);
+
+    // First load — no animation, just settle
+    if (settledPixelsRef.current.length === 0) {
+      settledPixelsRef.current = toPixels;
+      currentPixelsRef.current = toPixels;
+      setSettledPaths({
+        line: pixelsToLinePath(toPixels),
+        area: pixelsToAreaPath(toPixels),
+      });
+      return;
+    }
+
+    // Use the last rendered pixel array as the "from" (handles interruptions mid-animation)
+    const fromPixels = currentPixelsRef.current.length === N_POINTS
+      ? currentPixelsRef.current
+      : settledPixelsRef.current;
+
+    const startTime = Date.now();
+    cancelAnimationFrame(rafRef.current);
+
+    const tick = () => {
+      const elapsed = Date.now() - startTime;
+      const rawT = Math.min(elapsed / TRANSITION_DURATION, 1);
+      const t = easeInOut(rawT);
+
+      const interpolated: Pixel[] = toPixels.map((to, i) => {
+        const from = fromPixels[i] ?? to;
+        return {
+          x: from.x + (to.x - from.x) * t,
+          y: from.y + (to.y - from.y) * t,
+        };
+      });
+
+      currentPixelsRef.current = interpolated;
+      setTransition({
+        linePath: pixelsToLinePath(interpolated),
+        areaPath: pixelsToAreaPath(interpolated),
+      });
+
+      if (rawT < 1) {
+        rafRef.current = requestAnimationFrame(tick);
+      } else {
+        settledPixelsRef.current = toPixels;
+        currentPixelsRef.current = toPixels;
+        setSettledPaths({
+          line: pixelsToLinePath(toPixels),
+          area: pixelsToAreaPath(toPixels),
+        });
+        setTransition(null);
+      }
+    };
+
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [data]);
+
+  const { xScale, yScale, linePath, areaPath } = useMemo(() => {
     const xScale = d3Scale
       .scalePoint<string>()
       .domain(data.map(d => d.date))
-      .range([0, innerW])
+      .range([0, INNER_W])
       .padding(0);
 
     const [yMin, yMax] = d3Array.extent(data, d => d.rate) as [number, number];
@@ -102,39 +229,54 @@ export function RateChart({ data, currentRate, onScrub }: Props) {
     const yScale = d3Scale
       .scaleLinear()
       .domain([yMin - yPad, yMax + yPad])
-      .range([innerH, 0]);
+      .range([INNER_H, 0]);
 
     const curve = d3Shape.curveMonotoneX;
-    const linePath = d3Shape.line<RatePoint>()
+    const lineGen = d3Shape.line<RatePoint>()
       .x(d => xScale(d.date) ?? 0)
       .y(d => yScale(d.rate))
-      .curve(curve)(data) ?? '';
+      .curve(curve);
 
+    const linePath = lineGen(data) ?? '';
     const areaPath = d3Shape.area<RatePoint>()
       .x(d => xScale(d.date) ?? 0)
-      .y0(innerH)
+      .y0(INNER_H)
       .y1(d => yScale(d.rate))
       .curve(curve)(data) ?? '';
 
-    return { xScale, yScale, linePath, areaPath, yTicks: yScale.ticks(5) };
-  }, [data, innerW, innerH]);
+    return { xScale, yScale, linePath, areaPath };
+  }, [data]);
 
-  const currentRateY =
-    currentRate !== null ? yScale(currentRate) + PADDING_TOP : null;
+  // Split paths for scrub interaction
+  const { leftPath, rightPath } = useMemo(() => {
+    if (!tooltip || data.length === 0) return { leftPath: '', rightPath: '' };
 
-  // Handle touch for tooltip
+    const curve = d3Shape.curveMonotoneX;
+    const lineGen = d3Shape.line<RatePoint>()
+      .x(d => xScale(d.date) ?? 0)
+      .y(d => yScale(d.rate))
+      .curve(curve);
+
+    const leftData = data.slice(0, tooltip.idx + 1);
+    const rightData = data.slice(tooltip.idx);
+
+    return {
+      leftPath: leftData.length > 1 ? (lineGen(leftData) ?? '') : '',
+      rightPath: rightData.length > 1 ? (lineGen(rightData) ?? '') : '',
+    };
+  }, [tooltip?.idx, data, xScale, yScale]);
+
   const handleTouch = useCallback(
     (evt: any) => {
-      if (data.length === 0) return;
+      // Disable scrubbing during transition
+      if (transition !== null || data.length === 0) return;
       const touchX = evt.nativeEvent.locationX - PADDING_LEFT;
-      // Find nearest data point
-      const domain = data.map(d => d.date);
-      const step = innerW / Math.max(domain.length - 1, 1);
+      const step = INNER_W / Math.max(data.length - 1, 1);
       const idx = Math.round(touchX / step);
       const clampedIdx = Math.max(0, Math.min(idx, data.length - 1));
       if (clampedIdx !== lastIdxRef.current) {
         lastIdxRef.current = clampedIdx;
-        Haptics.selectionAsync();
+        Haptics.selectionAsync().catch(() => {});
       }
       const point = data[clampedIdx];
       onScrub?.(point.rate);
@@ -145,10 +287,10 @@ export function RateChart({ data, currentRate, onScrub }: Props) {
         y: py + PADDING_TOP,
         date: point.date,
         rate: point.rate,
-        screenX: px + PADDING_LEFT,
+        idx: clampedIdx,
       });
     },
-    [data, innerW, xScale, yScale],
+    [data, transition, xScale, yScale],
   );
 
   const handleTouchEnd = useCallback(() => {
@@ -166,31 +308,29 @@ export function RateChart({ data, currentRate, onScrub }: Props) {
   }
 
   const svgWidth = SCREEN_WIDTH;
+  const isTransitioning = transition !== null;
+  const isScrubbing = tooltip !== null;
 
-  // Pulsing dot — last data point coordinates
   const lastPoint = data[data.length - 1];
   const dotX = (xScale(lastPoint.date) ?? 0) + PADDING_LEFT;
   const dotY = yScale(lastPoint.rate) + PADDING_TOP;
 
-  // Format date for x-axis
   const fmtDate = (iso: string) => {
     const [, m, d] = iso.split('-');
     const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     return `${months[parseInt(m) - 1]} ${parseInt(d)}`;
   };
 
-  // Tooltip box: clamp so it doesn't go off-screen
-  const tooltipWidth = 110;
-  const tooltipHeight = 44;
-  const tooltipX = tooltip
+  const pillLeft = tooltip
     ? Math.min(
-        Math.max(tooltip.x - tooltipWidth / 2, 4),
-        svgWidth - tooltipWidth - 4,
+        Math.max(tooltip.x - PILL_WIDTH / 2, PADDING_LEFT),
+        svgWidth - PILL_WIDTH - PADDING_LEFT,
       )
     : 0;
-  const tooltipY = tooltip
-    ? Math.max(tooltip.y - tooltipHeight - 12, 4)
-    : 0;
+
+  // Use transition paths while morphing, settled paths otherwise (never raw useMemo paths)
+  const activeLine = transition?.linePath ?? settledPaths.line;
+  const activeArea = transition?.areaPath ?? settledPaths.area;
 
   return (
     <View
@@ -200,147 +340,117 @@ export function RateChart({ data, currentRate, onScrub }: Props) {
       onTouchEnd={handleTouchEnd}
     >
       <Animated.View style={{ opacity: chartFadeAnim, flex: 1 }}>
-      <Svg width={svgWidth} height={CHART_HEIGHT}>
-        <Defs>
-          <LinearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1">
-            <Stop offset="0%" stopColor={PRIMARY} stopOpacity={0.18} />
-            <Stop offset="100%" stopColor={PRIMARY} stopOpacity={0} />
-          </LinearGradient>
-        </Defs>
+        <Svg width={svgWidth} height={CHART_HEIGHT}>
+          <Defs>
+            <LinearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0%" stopColor={PRIMARY} stopOpacity={0.18} />
+              <Stop offset="100%" stopColor={PRIMARY} stopOpacity={0} />
+            </LinearGradient>
+          </Defs>
 
-        {/* Y-axis ticks + grid lines */}
-        {yTicks.map(tick => {
-          const ty = yScale(tick) + PADDING_TOP;
-          return (
-            <Line
-              key={tick}
-              x1={PADDING_LEFT}
-              y1={ty}
-              x2={CHART_WIDTH + PADDING_LEFT}
-              y2={ty}
-              stroke={NEU_300}
-              strokeWidth={0.5}
-              strokeDasharray="3,3"
-            />
-          );
-        })}
+          {/* Default state: full line + area fill */}
+          {!isScrubbing && (
+            <>
+              <Path
+                d={activeArea}
+                fill="url(#areaGradient)"
+                stroke="none"
+                transform={`translate(${PADDING_LEFT}, ${PADDING_TOP})`}
+              />
+              <Path
+                d={activeLine}
+                fill="none"
+                stroke={PRIMARY}
+                strokeWidth={1.5}
+                transform={`translate(${PADDING_LEFT}, ${PADDING_TOP})`}
+              />
+            </>
+          )}
 
-        {/* Current rate dotted line */}
-        {currentRateY !== null && (
-          <Line
-            x1={PADDING_LEFT}
-            y1={currentRateY}
-            x2={CHART_WIDTH + PADDING_LEFT}
-            y2={currentRateY}
-            stroke={PRIMARY}
-            strokeWidth={1}
-            strokeDasharray="4,4"
-            strokeOpacity={0.5}
-          />
+          {/* Scrub state: split line */}
+          {isScrubbing && (
+            <>
+              {rightPath ? (
+                <Path
+                  d={rightPath}
+                  fill="none"
+                  stroke={NEU_300}
+                  strokeWidth={1.5}
+                  transform={`translate(${PADDING_LEFT}, ${PADDING_TOP})`}
+                />
+              ) : null}
+              {leftPath ? (
+                <Path
+                  d={leftPath}
+                  fill="none"
+                  stroke={PRIMARY}
+                  strokeWidth={2}
+                  transform={`translate(${PADDING_LEFT}, ${PADDING_TOP})`}
+                />
+              ) : null}
+              <Line
+                x1={tooltip.x}
+                y1={PADDING_TOP}
+                x2={tooltip.x}
+                y2={CHART_HEIGHT - PADDING_BOTTOM}
+                stroke={PRIMARY}
+                strokeWidth={1}
+                strokeDasharray="3,3"
+                strokeOpacity={0.4}
+              />
+              <Circle
+                cx={tooltip.x}
+                cy={tooltip.y}
+                r={5}
+                fill={PRIMARY}
+                stroke="white"
+                strokeWidth={2}
+              />
+            </>
+          )}
+        </Svg>
+
+        {/* Date pill — shown while scrubbing */}
+        {isScrubbing && (
+          <View
+            pointerEvents="none"
+            style={[styles.datePill, { left: pillLeft }]}
+          >
+            <Text style={styles.datePillText}>{fmtDate(tooltip.date)}</Text>
+          </View>
         )}
 
-        {/* Gradient area fill */}
-        <Path
-          d={areaPath}
-          fill="url(#areaGradient)"
-          stroke="none"
-          transform={`translate(${PADDING_LEFT}, ${PADDING_TOP})`}
-        />
-
-        {/* Line */}
-        <Path
-          d={linePath}
-          fill="none"
-          stroke={PRIMARY}
-          strokeWidth={1.5}
-          transform={`translate(${PADDING_LEFT}, ${PADDING_TOP})`}
-        />
-
-
-        {/* Tooltip crosshair */}
-        {tooltip && (
+        {/* Pulsing live dot — hidden during transition and scrub */}
+        {!isTransitioning && !isScrubbing && (
           <>
-            <Line
-              x1={tooltip.x}
-              y1={PADDING_TOP}
-              x2={tooltip.x}
-              y2={CHART_HEIGHT - PADDING_BOTTOM}
-              stroke={PRIMARY}
-              strokeWidth={1}
-              strokeDasharray="3,3"
+            <Animated.View
+              pointerEvents="none"
+              style={{
+                position: 'absolute',
+                width: 18,
+                height: 18,
+                borderRadius: 9,
+                backgroundColor: PRIMARY,
+                opacity: pulseOpacityAnim,
+                left: dotX - 9,
+                top: dotY - 9,
+                transform: [{ scale: pulseScaleAnim }],
+              }}
             />
-            <Circle
-              cx={tooltip.x}
-              cy={tooltip.y}
-              r={5}
-              fill={PRIMARY}
-              stroke="white"
-              strokeWidth={2}
+            <View
+              pointerEvents="none"
+              style={{
+                position: 'absolute',
+                width: 8,
+                height: 8,
+                borderRadius: 4,
+                backgroundColor: PRIMARY,
+                left: dotX - 4,
+                top: dotY - 4,
+              }}
             />
-            {/* Tooltip box */}
-            <Rect
-              x={tooltipX}
-              y={tooltipY}
-              width={tooltipWidth}
-              height={tooltipHeight}
-              rx={8}
-              fill="white"
-              stroke={NEU_300}
-              strokeWidth={1}
-            />
-            <SvgText
-              x={tooltipX + tooltipWidth / 2}
-              y={tooltipY + 15}
-              textAnchor="middle"
-              fontSize={11}
-              fill={NEU_500}
-              fontFamily="System"
-            >
-              {fmtDate(tooltip.date)}
-            </SvgText>
-            <SvgText
-              x={tooltipX + tooltipWidth / 2}
-              y={tooltipY + 32}
-              textAnchor="middle"
-              fontSize={13}
-              fontWeight="600"
-              fill={NEU_900}
-              fontFamily="System"
-            >
-              {tooltip.rate.toFixed(5)}
-            </SvgText>
           </>
         )}
-      </Svg>
-
-      {/* Outer pulse ring */}
-      <Animated.View
-        pointerEvents="none"
-        style={{
-          position: 'absolute',
-          width: 18,
-          height: 18,
-          borderRadius: 9,
-          backgroundColor: PRIMARY,
-          opacity: pulseOpacityAnim,
-          left: dotX - 9,
-          top: dotY - 9,
-          transform: [{ scale: pulseScaleAnim }],
-        }}
-      />
-      {/* Inner dot */}
-      <View
-        pointerEvents="none"
-        style={{
-          position: 'absolute',
-          width: 8,
-          height: 8,
-          borderRadius: 4,
-          backgroundColor: PRIMARY,
-          left: dotX - 4,
-          top: dotY - 4,
-        }}
-      />
       </Animated.View>
     </View>
   );
@@ -361,5 +471,23 @@ const styles = StyleSheet.create({
   emptyText: {
     color: NEU_500,
     fontSize: 14,
+  },
+  datePill: {
+    position: 'absolute',
+    top: 8,
+    width: PILL_WIDTH,
+    alignItems: 'center',
+    backgroundColor: 'rgba(236, 233, 228, 0.95)',
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderWidth: 0.5,
+    borderColor: 'rgba(0,0,0,0.08)',
+  },
+  datePillText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#242620',
+    fontFamily: 'System',
   },
 });

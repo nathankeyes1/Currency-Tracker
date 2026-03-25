@@ -14,19 +14,19 @@ export function NavBar({ isFavorited, onFavorite }: Props) {
   return (
     <View style={styles.container}>
       <View style={styles.inner}>
-        <TouchableOpacity onPress={() => {}}>
+        <TouchableOpacity onPress={() => {}} activeOpacity={0.6}>
           <Ionicons name="chevron-back" size={26} color={NEU_900} />
         </TouchableOpacity>
         <View style={styles.spacer} />
         <View style={styles.rightIcons}>
-          <TouchableOpacity onPress={onFavorite}>
+          <TouchableOpacity onPress={onFavorite} activeOpacity={0.6}>
             <Ionicons
               name={isFavorited ? 'star' : 'star-outline'}
               size={22}
               color={NEU_900}
             />
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => Alert.alert('Rate alerts coming soon')}>
+          <TouchableOpacity onPress={() => Alert.alert('Rate alerts coming soon')} activeOpacity={0.6}>
             <Ionicons name="notifications-outline" size={22} color={NEU_900} />
           </TouchableOpacity>
         </View>
